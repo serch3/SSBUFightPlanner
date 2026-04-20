@@ -552,61 +552,34 @@ async downloadFileWithProgress(url, destPath, retries = 3, retryDelay = 1000) {
 
   async extractWith7Zip(filePath, extractTo) {
     return new Promise((resolve, reject) => {
-      // For macOS and Linux, use system p7zip command
-      if (process.platform === 'darwin' || process.platform === 'linux') {
-        const platform = process.platform === 'darwin' ? 'macOS' : 'Linux';
-        
-        // First, check if 7z is installed
-        child_process.exec('7z', (checkError, stdout, stderr) => {
-          if (checkError || !stdout.trim()) {
-            // p7zip is not installed - show modal
-            const errorMsg = process.platform === 'darwin'
-              ? 'p7zip is not installed. Please install it using Homebrew:\n\nbrew install p7zip\n\nThen restart the application.'
-              : 'p7zip is not installed. Please install it using your package manager (e.g., apt install p7zip-full) and restart the application.';
-            
-            console.error('p7zip not found on system');
-            
-            // Show modal dialog
-            dialog.showMessageBox({
-              type: 'error',
-              title: 'p7zip Required',
-              message: 'p7zip is not installed',
-              detail: errorMsg,
-              buttons: ['OK']
-            });
-            
-            reject(new Error('p7zip not installed'));
-            return;
-          }
-          
-          // p7zip is installed, proceed with extraction
-          const command = `7z x "${filePath}" -o"${extractTo}" -y`;
-          console.log(`Using p7zip command for ${platform}:`, command);
-          
-          child_process.exec(command, (error, stdout, stderr) => {
-            if (error) {
-              console.error('p7zip extraction error:', error);
-              reject(error);
-              return;
-            }
-            
-            if (!this.verifyExtraction(extractTo)) {
-              reject(new Error('No files found after extraction'));
-              return;
-            }
-            
-            resolve();
-          });
-        });
-      } else {
-        // Windows - use bundled 7z.exe with node-7z
-        const resourcePath = process.resourcesPath || path.join(__dirname, '..');
-        const sevenZipPath = path.join(resourcePath, 'src', 'resources', 'bin', '7z.exe');
-        console.log('Using 7-Zip from:', sevenZipPath);
-        
+      const resourcePath = process.resourcesPath || path.join(__dirname, '..');
+      const bundledBinary = process.platform === 'win32' ? '7z.exe' : '7zz';
+      const bundledPath = path.join(resourcePath, 'src', 'resources', 'bin', bundledBinary);
+      const isUnix = process.platform === 'darwin' || process.platform === 'linux';
+      const bundledExists = fs.existsSync(bundledPath);
+      let bundledExecutable = true;
+
+      if (bundledExists && isUnix) {
+        try {
+          fs.accessSync(bundledPath, fs.constants.X_OK);
+        } catch {
+          bundledExecutable = false;
+          console.warn(`Bundled ${bundledBinary} is not executable: ${bundledPath}`);
+        }
+      }
+
+      const canUseBundled = bundledExists && (process.platform === 'win32' || bundledExecutable);
+
+      const runExtraction = (binPath, useBundledLabel, onErrorFallback) => {
+        if (useBundledLabel) {
+          console.log(`Using bundled 7-Zip from: ${binPath}`);
+        } else {
+          console.log('Using system 7z from PATH');
+        }
+
         const seven = Seven.extractFull(filePath, extractTo, {
           $progress: false,
-          $bin: sevenZipPath
+          ...(binPath ? { $bin: binPath } : {})
         });
 
         seven.on('end', () => {
@@ -619,9 +592,57 @@ async downloadFileWithProgress(url, destPath, retries = 3, retryDelay = 1000) {
 
         seven.on('error', (err) => {
           console.error(`7-Zip extraction failed: ${err}`);
+          if (typeof onErrorFallback === 'function') {
+            const didFallback = onErrorFallback(err);
+            if (didFallback) return;
+          }
           reject(err);
         });
+      };
+
+      const trySystemFallback = (reasonText) => {
+        child_process.exec('7z', (checkError, stdout) => {
+          if (checkError || !stdout.trim()) {
+            const detail = process.platform === 'darwin'
+              ? `Could not use bundled 7zz (${reasonText}) and no system 7z command is available. Install p7zip with:\n\nbrew install p7zip\n\nThen restart the application.`
+              : `Could not use bundled 7zz (${reasonText}) and no system 7z command is available. Install p7zip-full using your package manager and restart the application.`;
+
+            dialog.showMessageBox({
+              type: 'error',
+              title: '7-Zip Not Available',
+              message: 'Archive extraction is not available',
+              detail,
+              buttons: ['OK']
+            });
+
+            reject(new Error('No bundled or system 7z binary available'));
+            return;
+          }
+
+          runExtraction(null, false);
+        });
+      };
+
+      if (canUseBundled) {
+        runExtraction(bundledPath, true, (err) => {
+          if (!isUnix) return false;
+          const message = String(err && (err.message || err));
+          if (!/EACCES/i.test(message)) return false;
+          console.warn('Bundled 7zz failed with EACCES, falling back to system 7z.');
+          trySystemFallback('permission denied');
+          return true;
+        });
+        return;
       }
+
+      // Fallback when bundled binary is unavailable in a specific runtime/package layout.
+      if (isUnix) {
+        const reason = bundledExists ? 'not executable' : 'missing bundled binary';
+        trySystemFallback(reason);
+        return;
+      }
+
+      reject(new Error(`7-Zip binary not found at ${bundledPath}`));
     });
   }
 

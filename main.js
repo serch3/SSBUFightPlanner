@@ -183,7 +183,7 @@ const fsp = require('fs').promises;  // Rename fs.promises to fsp
 const fse = require('fs-extra');
 const electronFs = require('original-fs');
 const AdmZip = require('adm-zip');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const os = require('os');
 const Store = require('electron-store');
 const toml = require('toml');
@@ -975,6 +975,7 @@ app.whenReady().then(async () => {
     if (!mainWindow) {
         createWindow();
     }
+    runStartupArchiveBinaryCheck();
 
 
     // Create hidden window for audio
@@ -1461,6 +1462,64 @@ function get7ZipPath() {
     log.info(`[7zip] Using ${binaryName} from: ${sevenZipPath}`);
     
     return sevenZipPath;
+}
+
+function checkBundled7ZipAvailability() {
+    const sevenZipPath = get7ZipPath();
+    const binaryName = path.basename(sevenZipPath);
+
+    if (!fs.existsSync(sevenZipPath)) {
+        return { ok: false, binaryName, path: sevenZipPath, reason: 'missing' };
+    }
+
+    if (process.platform !== 'win32') {
+        try {
+            fs.accessSync(sevenZipPath, fs.constants.X_OK);
+        } catch {
+            return { ok: false, binaryName, path: sevenZipPath, reason: 'not-executable' };
+        }
+    }
+
+    return { ok: true, binaryName, path: sevenZipPath, reason: null };
+}
+
+function sendRuntimeWarning(payload) {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    const emit = () => {
+        try {
+            mainWindow.webContents.send('runtime-warning', payload);
+        } catch (e) {
+            log.warn('[runtime-warning] Failed to send warning to renderer:', e?.message || e);
+        }
+    };
+
+    if (mainWindow.webContents.isLoadingMainFrame()) {
+        mainWindow.webContents.once('did-finish-load', emit);
+    } else {
+        emit();
+    }
+}
+
+function runStartupArchiveBinaryCheck() {
+    const check = checkBundled7ZipAvailability();
+    if (check.ok) {
+        log.info(`[7zip] Startup check OK (${check.binaryName}): ${check.path}`);
+        return;
+    }
+
+    const reasonText = check.reason === 'not-executable' ? 'not executable' : 'missing';
+    const detail = `Bundled archive binary is ${reasonText}: ${check.path}`;
+    log.warn('[7zip] Startup check failed:', detail);
+
+    sendRuntimeWarning({
+        type: 'archive-binary-missing',
+        title: 'Archive extraction may fail',
+        detail,
+        binaryName: check.binaryName,
+        path: check.path,
+        reason: check.reason
+    });
 }
 
 function extractArchive(source, destination) {
@@ -2899,23 +2958,27 @@ ipcMain.handle('launch-game', async () => {
             throw new Error('Please configure emulator and game paths first');
         }
 
-        let command;
+        let emulatorArgs;
         if (selectedEmulator === 'yuzu') {
-            command = `"${emulatorPath}" -g "${gamePath}"${yuzuFullscreen ? ' -f' : ''}`;
+            emulatorArgs = ['-g', gamePath, ...(yuzuFullscreen ? ['-f'] : [])];
         } else if (selectedEmulator === 'ryujinx') {
-            command = `"${emulatorPath}" "${gamePath}"`;
+            emulatorArgs = [gamePath];
         } else {
             throw new Error('Invalid emulator selected');
         }
 
-        exec(command, { maxBuffer: 2048 * 2048 }, (error, stdout, stderr) => {
-            if (error) {
+        // macOS users may select .app bundles; launch these via `open -a ... --args ...`.
+        if (process.platform === 'darwin' && emulatorPath.toLowerCase().endsWith('.app')) {
+            const openArgs = ['-a', emulatorPath, '--args', ...emulatorArgs];
+            const child = spawn('open', openArgs, { detached: true, stdio: 'ignore' });
+            child.unref();
+        } else {
+            const child = spawn(emulatorPath, emulatorArgs, { detached: true, stdio: 'ignore' });
+            child.on('error', (error) => {
                 console.error('Failed to launch game:', error);
-                console.error('stdout:', stdout);
-                console.error('stderr:', stderr);
-                throw new Error(`Failed to launch game: ${error.message}`);
-            }
-        });
+            });
+            child.unref();
+        }
 
         return true;
     } catch (error) {

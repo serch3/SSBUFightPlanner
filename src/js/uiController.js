@@ -108,10 +108,28 @@ class UIController {
                     try { await this.loadPlugins(); } catch {}
                 });
             }
+
+            window.api.on('runtime-warning', (payload) => {
+                try {
+                    if (payload?.type === 'archive-binary-missing') {
+                        const reason = payload.reason === 'not-executable'
+                            ? 'not executable'
+                            : 'missing';
+                        this.showToast(`Warning: bundled ${payload.binaryName || 'archive binary'} is ${reason}. Archive extraction may fail.`, 'warning');
+                        console.warn('[runtime-warning]', payload?.detail || payload);
+                    }
+                } catch (error) {
+                    console.error('Failed to handle runtime warning:', error);
+                }
+            });
         } catch (error) {
             console.error('UIController initialization error:', error);
             this.showError('Failed to initialize UI: ' + error.message);
         }
+    }
+
+    joinPath(basePath, leaf) {
+        return `${String(basePath).replace(/[\\/]+$/, '')}/${leaf}`;
     }
 
     
@@ -1911,7 +1929,7 @@ async showModInfoEditor(modPath) {
 
         // Load raw info.toml content
         try {
-            const infoPath = `${modPath}\\info.toml`;
+            const infoPath = this.joinPath(modPath, 'info.toml');
             if (await window.api.modOperations.fileExists(infoPath)) {
                 const content = await window.api.modOperations.readModFile(infoPath);
                 rawTextarea.value = content;
@@ -1933,7 +1951,7 @@ async showModInfoEditor(modPath) {
             const advancedMode = rawView && rawView.style.display !== 'none';
             if (advancedMode) {
                 try {
-                    const infoPath = `${modPath}\\info.toml`;
+                    const infoPath = this.joinPath(modPath, 'info.toml');
                     await window.api.modOperations.writeModFile(infoPath, rawTextarea.value);
                     this.showToast('Mod info saved successfully', 'success');
                     modal.hide();
@@ -3348,6 +3366,7 @@ async showChangeSlotsDialog(selectedMods, file) {
                     // Check Python availability first
                     const pyCheck = await window.api.reslotter.checkPython();
                     if (!pyCheck?.available) {
+                        const isWindows = navigator.platform.toLowerCase().includes('win');
                         const modalId = 'pythonMissingModal';
                         document.getElementById(modalId)?.remove();
                         const html = `
@@ -3362,7 +3381,7 @@ async showChangeSlotsDialog(selectedMods, file) {
                                             <p>We could not find Python on your system (python --version failed). Please install Python 3 and ensure the 'python' command is available in your PATH.</p>
                                             <ul>
                                                 <li>Download: <a href="https://www.python.org/downloads/" target="_blank">python.org/downloads</a></li>
-                                                <li>During installation, check "Add python.exe to PATH".</li>
+                                                <li>${isWindows ? 'During installation, check "Add python.exe to PATH".' : 'Ensure the python command is available in your shell PATH (e.g., via Homebrew or your package manager).'}</li>
                                                 <li>If you still got issue, restart your computer or tell the the Discord Server about your problem.</li>
                                             </ul>
                                             ${pyCheck?.error ? `<div class="small textmuted">Details: ${this.escapeHtml(pyCheck.error)}</div>` : ''}

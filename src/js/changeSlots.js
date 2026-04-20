@@ -1,4 +1,8 @@
 export class ChangeSlots {
+    static joinPath(basePath, leaf) {
+        return `${String(basePath).replace(/[\\/]+$/, '')}/${leaf}`;
+    }
+
     static async scanForSlots(modPath) {
         try {
         const files = await window.api.modOperations.getModFiles(modPath);
@@ -90,7 +94,7 @@ console.log('[scanForSlots] Slots détectés:', sortedSlots);
     }
 
     static async addMissingFilesToConfig(modPath, fighterName, targetAlt, allFiles) {
-    const configPath = `${modPath}\\config.json`;
+    const configPath = this.joinPath(modPath, 'config.json');
     let configContent = '{}';
     let config = {
         "new-dir-infos": [],
